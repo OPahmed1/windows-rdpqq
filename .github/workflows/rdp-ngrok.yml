@@ -1,49 +1,56 @@
-name: Free RDP
+name: RDP
 
 on:
   workflow_dispatch:
 
 jobs:
-  build:
+  secure-rdp:
     runs-on: windows-latest
     timeout-minutes: 360
 
     steps:
-    - name: Enable RDP
-      run: |
-        Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name "fDenyTSConnections" -Value 0
-        Enable-NetFirewallRule -DisplayGroup "Remote Desktop"
-        Restart-Service -Name TermService
+      - name: Enable RDP and Configure Firewall
+        run: |
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name "fDenyTSConnections" -Value 0 -Force
+          netsh advfirewall firewall add rule name="RDP" dir=in action=allow protocol=TCP localport=3389
+          Restart-Service -Name TermService -Force
 
-    - name: Create User
-      run: |
-        Add-Type -AssemblyName System.Web
-        $password = [System.Web.Security.Membership]::GeneratePassword(14,3)
-        $securePass = ConvertTo-SecureString $password -AsPlainText -Force
-        New-LocalUser -Name "RDP" -Password $securePass -AccountNeverExpires
-        Add-LocalGroupMember -Group "Administrators" -Member "RDP"
-        Add-LocalGroupMember -Group "Remote Desktop Users" -Member "RDP"
-        echo "USERNAME=RDP" >> $env:GITHUB_ENV
-        echo "PASSWORD=$password" >> $env:GITHUB_ENV
+      - name: Create RDP User with Secure Password
+        run: |
+          $chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789!@#$%^&*()-_=+[]{}'
+          $password = -join ((1..16) | ForEach-Object { $chars | Get-Random })
+          $securePass = ConvertTo-SecureString $password -AsPlainText -Force
+          New-LocalUser -Name "RDP" -Password $securePass -AccountNeverExpires
+          Add-LocalGroupMember -Group "Administrators" -Member "RDP"
+          Add-LocalGroupMember -Group "Remote Desktop Users" -Member "RDP"
+          echo "RDP_PASSWORD=$password" >> $env:GITHUB_ENV
 
-    - name: Download & Setup Ngrok
-      run: |
-        $ngrokPath = "$env:RUNNER_TEMP\ngrok"
-        Invoke-WebRequest -Uri https://bin.equinox.io/c/4VmDzA7iaHb/ngrok-stable-windows-amd64.zip -OutFile "$env:RUNNER_TEMP\ngrok.zip"
-        Expand-Archive "$env:RUNNER_TEMP\ngrok.zip" -DestinationPath $ngrokPath
-        echo "NGROK_EXE=$ngrokPath\ngrok.exe" >> $env:GITHUB_ENV
+      - name: Install Ngrok
+        run: |
+          Invoke-WebRequest -Uri https://bin.equinox.io/c/bNyj1mQVY4c/ngrok-stable-windows-amd64.zip -OutFile ngrok.zip
+          Expand-Archive ngrok.zip -DestinationPath $env:USERPROFILE\ngrok -Force
+          echo "$env:USERPROFILE\ngrok" | Out-File -Append -FilePath $env:GITHUB_PATH
 
-    - name: Start Tunnel
-      run: |
-        & "${{ env.NGROK_EXE }}" authtoken "${{ secrets.NGROK_AUTH_TOKEN }}"
-        Start-Process -FilePath "${{ env.NGROK_EXE }}" -ArgumentList "tcp 3389" -WindowStyle Hidden
-        Start-Sleep -Seconds 10
-        $tunnels = Invoke-RestMethod -Uri http://127.0.0.1:4040/api/tunnels
-        $url = $tunnels.tunnels[0].public_url
-        echo "RDP_URL=$url" >> $env:GITHUB_ENV
-        Write-Host "================================"
-        Write-Host "RDP Connect: $url"
-        Write-Host "User: RDP"
-        Write-Host "Pass: $env:PASSWORD"
-        Write-Host "================================"
-        while ($true) { Start-Sleep -Seconds 300 }
+      - name: Connect Ngrok
+        run: |
+          ngrok config add-authtoken ${{ secrets.NGROK_AUTH_TOKEN }}
+          Start-Process ngrok -ArgumentList "tcp 3389" -NoNewWindow
+
+      - name: Display Connection Info
+        run: |
+          Start-Sleep -Seconds 10
+          $tunnels = Invoke-RestMethod -Uri http://127.0.0.1:4040/api/tunnels
+          $tcpUrl = ($tunnels.tunnels.public_url | Where-Object { $_ -like "tcp:*" })
+          echo "======================================="
+          echo "Ngrok RDP Details:"
+          echo "Address: $tcpUrl"
+          echo "Username: RDP"
+          echo "Password: $env:RDP_PASSWORD"
+          echo "======================================="
+
+      - name: Keep Alive
+        run: |
+          while ($true) {
+            Write-Host "[$(Get-Date)] RDP Session Active..."
+            Start-Sleep -Seconds 300
+          }
